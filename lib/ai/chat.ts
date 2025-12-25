@@ -140,7 +140,11 @@ Available variants: ${
         product.variants?.colors
           ? `Colors: ${product.variants.colors.join(", ")}`
           : ""
-      }${product.variants?.sizes ? ` | Sizes: ${product.variants.sizes.join(", ")}` : ""}${
+      }${
+        product.variants?.sizes
+          ? ` | Sizes: ${product.variants.sizes.join(", ")}`
+          : ""
+      }${
         product.variants?.storage
           ? ` | Storage: ${product.variants.storage.join(", ")}`
           : ""
@@ -181,7 +185,12 @@ RECOMMENDATION GUIDELINES:
 
 STYLE GUIDELINES:
 - Keep responses concise but informative
-- Use bullet points for lists when appropriate
+- Use **markdown formatting** for better readability:
+  * Use **bold** for product names and important features
+  * Use bullet points (- or *) for lists
+  * Use numbered lists for step-by-step instructions
+  * Use > for highlights or important notes
+  * Use inline code \`backticks\` for technical terms
 - Be enthusiastic about products without being pushy
 - Help users make informed decisions based on their needs`;
 
@@ -207,7 +216,123 @@ Suggest questions like:
 ${websiteInfo.defaultChatChips.map((q) => `- "${q}"`).join("\n")}`;
 }
 
-// Main function to generate chat response
+// Streaming response generator
+export async function* generateChatResponseStream(
+  userMessage: string,
+  chatHistory: ChatHistoryMessage[],
+  productSlug?: string
+): AsyncGenerator<string, void, unknown> {
+  // Determine available tools based on context
+  // getAllProducts is always available so users can get recommendations anywhere
+  const tools = productSlug
+    ? [
+        getWebsiteDataDeclaration,
+        getProductDataDeclaration,
+        getAllProductsDeclaration,
+      ]
+    : [getWebsiteDataDeclaration, getAllProductsDeclaration];
+
+  // Build conversation history for Gemini
+  const contents = chatHistory.map((msg) => ({
+    role: msg.role === "user" ? "user" : "model",
+    parts: [{ text: msg.content }],
+  }));
+
+  // Add current user message
+  contents.push({
+    role: "user",
+    parts: [{ text: userMessage }],
+  });
+
+  try {
+    // Generate response with function calling
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-lite",
+      contents: contents,
+      config: {
+        systemInstruction: getSystemInstruction(productSlug),
+        tools: [{ functionDeclarations: tools }],
+      },
+    });
+
+    // Handle function calls if present
+    if (response.functionCalls && response.functionCalls.length > 0) {
+      const functionResults = [];
+
+      for (const call of response.functionCalls) {
+        let result: string;
+
+        if (call.name === "getWebsiteData") {
+          const args = call.args as { infoType: string };
+          result = getWebsiteData(args.infoType || "all");
+        } else if (call.name === "getProductData") {
+          const args = call.args as { productSlug: string };
+          result = getProductData(args.productSlug || productSlug || "");
+        } else if (call.name === "getAllProducts") {
+          result = getAllProducts();
+        } else {
+          result = "Unknown function";
+        }
+
+        functionResults.push({
+          name: call.name,
+          response: { result },
+        });
+      }
+
+      // Send function results back to get final response with streaming
+      const followUpContents = [
+        ...contents,
+        {
+          role: "model",
+          parts: response.functionCalls.map((call) => ({
+            functionCall: call,
+          })),
+        },
+        {
+          role: "user",
+          parts: functionResults.map((fr) => ({
+            functionResponse: fr,
+          })),
+        },
+      ];
+
+      const streamResponse = await ai.models.generateContentStream({
+        model: "gemini-2.5-flash-lite",
+        contents: followUpContents,
+        config: {
+          systemInstruction: getSystemInstruction(productSlug),
+        },
+      });
+
+      for await (const chunk of streamResponse) {
+        if (chunk.text) {
+          yield chunk.text;
+        }
+      }
+    } else {
+      // Direct response without function calling - stream it
+      const streamResponse = await ai.models.generateContentStream({
+        model: "gemini-2.5-flash-lite",
+        contents: contents,
+        config: {
+          systemInstruction: getSystemInstruction(productSlug),
+        },
+      });
+
+      for await (const chunk of streamResponse) {
+        if (chunk.text) {
+          yield chunk.text;
+        }
+      }
+    }
+  } catch (error) {
+    console.error("AI Chat Error:", error);
+    yield "I'm having trouble connecting right now. Please try again in a moment.";
+  }
+}
+
+// Main function to generate chat response (non-streaming, for backward compatibility)
 export async function generateChatResponse(
   userMessage: string,
   chatHistory: ChatHistoryMessage[],
@@ -216,7 +341,11 @@ export async function generateChatResponse(
   // Determine available tools based on context
   // getAllProducts is always available so users can get recommendations anywhere
   const tools = productSlug
-    ? [getWebsiteDataDeclaration, getProductDataDeclaration, getAllProductsDeclaration]
+    ? [
+        getWebsiteDataDeclaration,
+        getProductDataDeclaration,
+        getAllProductsDeclaration,
+      ]
     : [getWebsiteDataDeclaration, getAllProductsDeclaration];
 
   // Build conversation history for Gemini

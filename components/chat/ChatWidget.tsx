@@ -86,6 +86,15 @@ export default function ChatWidget({
     setInput("");
     setIsLoading(true);
 
+    // Create a temporary message for streaming
+    const aiMessageId = (Date.now() + 1).toString();
+    const aiMessage: Message = {
+      id: aiMessageId,
+      role: "assistant",
+      content: "",
+    };
+    setMessages((prev) => [...prev, aiMessage]);
+
     try {
       // Build chat history for API (exclude current message)
       const history = messages.map((msg) => ({
@@ -109,29 +118,68 @@ export default function ChatWidget({
         throw new Error("Failed to get response");
       }
 
-      const data = await response.json();
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
 
-      const aiMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: data.response,
-      };
+      if (!reader) {
+        throw new Error("No reader available");
+      }
 
-      setMessages((prev) => [...prev, aiMessage]);
+      let accumulatedContent = "";
 
-      // Update chips if suggested questions are returned
-      if (data.suggestedQuestions && data.suggestedQuestions.length > 0) {
-        setChips(data.suggestedQuestions);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n").filter((line) => line.trim());
+
+        for (const line of lines) {
+          try {
+            const data = JSON.parse(line);
+
+            if (data.chunk) {
+              // Accumulate content
+              accumulatedContent += data.chunk;
+              // Update the message in real-time
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === aiMessageId
+                    ? { ...msg, content: accumulatedContent }
+                    : msg
+                )
+              );
+            }
+
+            if (data.done) {
+              // Update chips if suggested questions are returned
+              if (data.suggestedQuestions && data.suggestedQuestions.length > 0) {
+                setChips(data.suggestedQuestions);
+              }
+            }
+
+            if (data.error) {
+              throw new Error(data.error);
+            }
+          } catch (parseError) {
+            console.error("Error parsing JSON:", parseError);
+          }
+        }
       }
     } catch (error) {
       console.error("Chat error:", error);
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content:
-          "I'm having trouble connecting right now. Please try again in a moment.",
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      // Update the existing AI message with error
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === aiMessageId
+            ? {
+                ...msg,
+                content:
+                  "I'm having trouble connecting right now. Please try again in a moment.",
+              }
+            : msg
+        )
+      );
     } finally {
       setIsLoading(false);
     }
