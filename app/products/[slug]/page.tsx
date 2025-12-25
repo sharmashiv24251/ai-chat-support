@@ -149,6 +149,7 @@ export default function ProductPage() {
           isOpen={chatOpen}
           onClose={() => setChatOpen(!chatOpen)}
           productName={product.name}
+          productSlug={product.slug}
           productChips={product.predefinedQuestions}
         />
       </div>

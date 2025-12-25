@@ -30,10 +30,10 @@ export const websiteInfo: WebsiteInfo = {
     "Most items ship within 24 hours. Limited stock items are marked accordingly.",
 
   defaultChatChips: [
-    "Order status",
+    "What should I buy for a gamer?",
+    "Compare iPhone vs PlayStation",
     "Shipping info",
     "Best sellers",
-    "Return policy",
   ],
 
   aiContext: `BuyHard™ is a premium e-commerce platform specializing in curated tech and lifestyle products.

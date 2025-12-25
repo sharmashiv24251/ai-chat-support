@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect } from "react";
 import ChatMessage from "./ChatMessage";
-import { getMockResponse } from "@/lib/constants/website";
 
 interface Message {
   id: string;
@@ -14,6 +13,7 @@ interface ChatWidgetProps {
   isOpen: boolean;
   onClose: () => void;
   productName?: string;
+  productSlug?: string;
   productChips?: string[];
 }
 
@@ -21,6 +21,7 @@ export default function ChatWidget({
   isOpen,
   onClose,
   productName,
+  productSlug,
   productChips,
 }: ChatWidgetProps) {
   const [messages, setMessages] = useState<Message[]>([
@@ -33,6 +34,7 @@ export default function ChatWidget({
     },
   ]);
   const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const defaultChips = [
@@ -41,7 +43,7 @@ export default function ChatWidget({
     "Best sellers",
     "Return policy",
   ];
-  const chips = productChips || defaultChips;
+  const [chips, setChips] = useState(productChips || defaultChips);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -57,11 +59,22 @@ export default function ChatWidget({
           content: `Looking at ${productName}? Great choice! Ask me anything — specs, comparisons, shipping, I've got you.`,
         },
       ]);
+      setChips(productChips || defaultChips);
+    } else {
+      setMessages([
+        {
+          id: Date.now().toString(),
+          role: "assistant",
+          content:
+            "Hey! I'm your AI shopping assistant. Ask me about any product, shipping, returns — or just say what you're looking for.",
+        },
+      ]);
+      setChips(defaultChips);
     }
-  }, [productName]);
+  }, [productName, productChips]);
 
-  const sendMessage = (text: string) => {
-    if (!text.trim()) return;
+  const sendMessage = async (text: string) => {
+    if (!text.trim() || isLoading) return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -71,21 +84,61 @@ export default function ChatWidget({
 
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
+    setIsLoading(true);
 
-    // Simulate AI response
-    setTimeout(() => {
-      const response = getMockResponse(text);
+    try {
+      // Build chat history for API (exclude current message)
+      const history = messages.map((msg) => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: text,
+          history,
+          productSlug,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to get response");
+      }
+
+      const data = await response.json();
+
       const aiMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: response,
+        content: data.response,
       };
+
       setMessages((prev) => [...prev, aiMessage]);
-    }, 600);
+
+      // Update chips if suggested questions are returned
+      if (data.suggestedQuestions && data.suggestedQuestions.length > 0) {
+        setChips(data.suggestedQuestions);
+      }
+    } catch (error) {
+      console.error("Chat error:", error);
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content:
+          "I'm having trouble connecting right now. Please try again in a moment.",
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !isLoading) {
       sendMessage(input);
     }
   };
@@ -140,7 +193,7 @@ export default function ChatWidget({
             </div>
             <div className="text-[10px] text-emerald-600 font-medium flex items-center gap-1">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              Online
+              {isLoading ? "Thinking..." : "Online"}
             </div>
           </div>
         </div>
@@ -170,6 +223,13 @@ export default function ChatWidget({
         {messages.map((msg) => (
           <ChatMessage key={msg.id} role={msg.role} content={msg.content} />
         ))}
+        {isLoading && (
+          <div className="flex gap-1 px-4 py-3">
+            <span className="h-2 w-2 bg-neutral-400 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+            <span className="h-2 w-2 bg-neutral-400 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+            <span className="h-2 w-2 bg-neutral-400 rounded-full animate-bounce"></span>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -179,7 +239,8 @@ export default function ChatWidget({
           <button
             key={chip}
             onClick={() => sendMessage(chip)}
-            className="text-xs px-3 py-1.5 rounded-full border border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50 hover:border-neutral-300 transition-colors shadow-sm"
+            disabled={isLoading}
+            className="text-xs px-3 py-1.5 rounded-full border border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50 hover:border-neutral-300 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {chip}
           </button>
@@ -194,12 +255,14 @@ export default function ChatWidget({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={handleKeyPress}
-            className="flex-1 bg-transparent border-none outline-none text-sm placeholder-neutral-400 text-neutral-900 px-3 h-9"
-            placeholder="Type a message..."
+            disabled={isLoading}
+            className="flex-1 bg-transparent border-none outline-none text-sm placeholder-neutral-400 text-neutral-900 px-3 h-9 disabled:opacity-50"
+            placeholder={isLoading ? "AI is thinking..." : "Type a message..."}
           />
           <button
             onClick={() => sendMessage(input)}
-            className="h-8 w-8 rounded-full bg-black text-white flex items-center justify-center hover:bg-neutral-800 transition-colors flex-shrink-0"
+            disabled={isLoading || !input.trim()}
+            className="h-8 w-8 rounded-full bg-black text-white flex items-center justify-center hover:bg-neutral-800 transition-colors flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
