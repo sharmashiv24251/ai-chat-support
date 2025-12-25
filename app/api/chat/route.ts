@@ -4,6 +4,11 @@ import { db } from "@/lib/db/db";
 import { conversations, messages } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 
+// Force Node.js runtime for longer timeout (Edge has 25s limit)
+export const runtime = "nodejs";
+// Allow up to 60 seconds for AI response generation
+export const maxDuration = 60;
+
 // Validation constants
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -14,6 +19,15 @@ function generateId(): string {
 
 export async function POST(request: NextRequest) {
   try {
+    // Early check for API key configuration
+    if (!process.env.GEMINI_API_KEY) {
+      console.error("GEMINI_API_KEY is not configured");
+      return Response.json(
+        { error: "AI service is not configured. Please set GEMINI_API_KEY." },
+        { status: 503 }
+      );
+    }
+
     // Parse request body safely
     let body: unknown;
     try {

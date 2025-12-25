@@ -2,8 +2,14 @@ import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { websiteInfo } from "@/lib/constants/website";
 import { getProductBySlug, products } from "@/lib/constants/products";
 
+// Validate API key is present
+const apiKey = process.env.GEMINI_API_KEY;
+if (!apiKey) {
+  console.warn("⚠️ GEMINI_API_KEY is not set. AI features will not work.");
+}
+
 // Initialize Google GenAI client
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const ai = new GoogleGenAI({ apiKey: apiKey || "" });
 
 // Define the prioritized list of models to use for fallback
 // 1. Flash-Lite (Best free limits)

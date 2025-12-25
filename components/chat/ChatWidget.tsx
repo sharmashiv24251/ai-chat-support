@@ -113,7 +113,22 @@ export default function ChatWidget({
         }),
       });
 
-      const data = await response.json();
+      // Safely parse JSON response - handle empty/invalid responses
+      let data;
+      try {
+        const text = await response.text();
+        if (!text) {
+          throw new Error(
+            "Server returned an empty response. Please try again."
+          );
+        }
+        data = JSON.parse(text);
+      } catch (parseError) {
+        console.error("JSON parse error:", parseError);
+        throw new Error(
+          "Server response error. The request may have timed out. Please try again."
+        );
+      }
 
       if (!response.ok) {
         throw new Error(data.error || "Failed to get response");
