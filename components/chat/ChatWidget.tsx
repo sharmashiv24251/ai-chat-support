@@ -35,6 +35,7 @@ export default function ChatWidget({
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isMaximized, setIsMaximized] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const defaultChips = [
@@ -153,7 +154,10 @@ export default function ChatWidget({
 
             if (data.done) {
               // Update chips if suggested questions are returned
-              if (data.suggestedQuestions && data.suggestedQuestions.length > 0) {
+              if (
+                data.suggestedQuestions &&
+                data.suggestedQuestions.length > 0
+              ) {
                 setChips(data.suggestedQuestions);
               }
             }
@@ -216,7 +220,11 @@ export default function ChatWidget({
   }
 
   return (
-    <div className="w-[24rem] max-w-[calc(100vw-3rem)] rounded-3xl overflow-hidden shadow-2xl border border-white/50 bg-white/80 backdrop-blur-xl ring-1 ring-black/5 flex flex-col transition-all duration-300 origin-bottom-right">
+    <div
+      className={`${
+        isMaximized ? "w-[40vw] min-w-[28rem]" : "w-[24rem]"
+      } max-w-[calc(100vw-3rem)] rounded-3xl overflow-hidden shadow-2xl border border-white/50 bg-white/80 backdrop-blur-xl ring-1 ring-black/5 flex flex-col transition-all duration-500 ease-out origin-bottom-right`}
+    >
       {/* Header */}
       <div className="px-5 py-4 border-b border-black/5 bg-white/50 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -245,29 +253,78 @@ export default function ChatWidget({
             </div>
           </div>
         </div>
-        <button
-          onClick={onClose}
-          className="p-2 text-neutral-400 hover:text-neutral-900 transition-colors rounded-full hover:bg-black/5"
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+        <div className="flex items-center gap-1">
+          {/* Maximize/Minimize Button */}
+          <button
+            onClick={() => setIsMaximized(!isMaximized)}
+            className="p-2 text-neutral-400 hover:text-neutral-900 transition-colors rounded-full hover:bg-black/5"
+            title={isMaximized ? "Minimize" : "Expand"}
           >
-            <path d="M18 6 6 18" />
-            <path d="m6 6 12 12" />
-          </svg>
-        </button>
+            {isMaximized ? (
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="4 14 10 14 10 20" />
+                <polyline points="20 10 14 10 14 4" />
+                <line x1="14" y1="10" x2="21" y2="3" />
+                <line x1="3" y1="21" x2="10" y2="14" />
+              </svg>
+            ) : (
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="15 3 21 3 21 9" />
+                <polyline points="9 21 3 21 3 15" />
+                <line x1="21" y1="3" x2="14" y2="10" />
+                <line x1="3" y1="21" x2="10" y2="14" />
+              </svg>
+            )}
+          </button>
+          {/* Close Button */}
+          <button
+            onClick={onClose}
+            className="p-2 text-neutral-400 hover:text-neutral-900 transition-colors rounded-full hover:bg-black/5"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* Messages */}
-      <div className="h-80 overflow-y-auto px-5 py-4 space-y-4 scrollbar-hide bg-white/30">
+      <div
+        className={`${
+          isMaximized ? "h-[50vh]" : "h-80"
+        } overflow-y-auto px-5 py-4 space-y-4 scrollbar-hide bg-white/30 transition-all duration-500 ease-out`}
+      >
         {messages.map((msg) => (
           <ChatMessage key={msg.id} role={msg.role} content={msg.content} />
         ))}

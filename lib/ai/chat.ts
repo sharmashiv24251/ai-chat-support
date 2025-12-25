@@ -296,7 +296,7 @@ export async function* generateChatResponseStream(
         !isRateLimitError(error)
       ) {
         console.error(`All models failed or non-retriable error:`, error);
-        yield "I'm currently experiencing high traffic. Please try again in a few seconds.";
+        yield "Man , Free Api key got rate limited 🥲";
         return;
       }
       // Otherwise, log and try next model
@@ -437,8 +437,7 @@ export async function generateChatResponse(
       ) {
         console.error(`All models failed or non-retriable error:`, error);
         return {
-          response:
-            "I'm currently experiencing high traffic. Please try again in a moment.",
+          response: "Man , Free Api key got rate limited 🥲",
           suggestedQuestions: [],
         };
       }
