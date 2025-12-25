@@ -2,16 +2,42 @@ import { drizzle } from "drizzle-orm/libsql";
 import { createClient } from "@libsql/client";
 import * as schema from "./schema";
 
-// Strip unsupported URL parameters for libSQL (e.g., sslmode from PostgreSQL URLs)
-function sanitizeDatabaseUrl(url: string): string {
-  // Skip sanitization for file-based SQLite URLs
+const LOCAL_SQLITE_URL = "file:./sqlite.db";
+
+// Supported libSQL URL schemes
+const SUPPORTED_SCHEMES = [
+  "libsql:",
+  "wss:",
+  "ws:",
+  "https:",
+  "http:",
+  "file:",
+];
+
+// Get a valid libSQL database URL, falling back to local SQLite for unsupported schemes
+function getDatabaseUrl(url: string): string {
+  // Check if URL starts with a supported scheme
+  const isSupported = SUPPORTED_SCHEMES.some((scheme) =>
+    url.startsWith(scheme)
+  );
+
+  if (!isSupported) {
+    console.warn(
+      `DATABASE_URL uses unsupported scheme. LibSQL supports: ${SUPPORTED_SCHEMES.join(
+        ", "
+      )}. Falling back to local SQLite.`
+    );
+    return LOCAL_SQLITE_URL;
+  }
+
+  // Skip further processing for file-based SQLite URLs
   if (url.startsWith("file:")) {
     return url;
   }
 
   try {
     const parsedUrl = new URL(url);
-    // Remove unsupported libSQL parameters
+    // Remove unsupported libSQL parameters (e.g., from PostgreSQL URLs)
     const unsupportedParams = [
       "sslmode",
       "ssl",
@@ -27,7 +53,7 @@ function sanitizeDatabaseUrl(url: string): string {
   }
 }
 
-const databaseUrl = sanitizeDatabaseUrl(
+const databaseUrl = getDatabaseUrl(
   process.env.DATABASE_URL || "file:./sqlite.db"
 );
 
