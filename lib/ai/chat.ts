@@ -5,6 +5,31 @@ import { getProductBySlug, products } from "@/lib/constants/products";
 // Initialize Google GenAI client
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
+// Define the prioritized list of models to use for fallback
+// 1. Flash-Lite (Best free limits)
+// 2. Flash-8B (Previous gen, often has separate limits)
+// 3. Flash (Standard, smarter but stricter limits)
+const BACKUP_MODELS = [
+  "gemini-2.0-flash-lite",
+  "gemini-2.0-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-3-flash-preview",
+];
+
+// Helper to check if an error is a rate limit error
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isRateLimitError(error: any): boolean {
+  return (
+    error?.status === 429 ||
+    error?.code === 429 ||
+    error?.error?.code === 429 ||
+    error?.message?.includes("429") ||
+    error?.message?.includes("quota") ||
+    error?.message?.includes("RESOURCE_EXHAUSTED")
+  );
+}
+
 // Define function declarations for tools
 const getWebsiteDataDeclaration: FunctionDeclaration = {
   name: "getWebsiteData",
@@ -192,7 +217,15 @@ STYLE GUIDELINES:
   * Use > for highlights or important notes
   * Use inline code \`backticks\` for technical terms
 - Be enthusiastic about products without being pushy
-- Help users make informed decisions based on their needs`;
+- Help users make informed decisions based on their needs
+
+PRODUCT CARD FEATURE:
+- When recommending or mentioning specific products, include a product card using this syntax: [[product:product-slug]]
+- Place product cards on their own line after describing the product
+- The available product slugs are: nike-zoom-velocity, iphone-16, playstation-5
+- Example: "For gaming, I highly recommend the PlayStation 5! [[product:playstation-5]]"
+- Always use the exact slug from the product catalog
+- You can include multiple product cards when comparing or recommending several products`;
 
   if (productSlug) {
     const product = getProductBySlug(productSlug);
@@ -216,14 +249,12 @@ Suggest questions like:
 ${websiteInfo.defaultChatChips.map((q) => `- "${q}"`).join("\n")}`;
 }
 
-// Streaming response generator
+// Streaming response generator with Waterfall Fallback Logic
 export async function* generateChatResponseStream(
   userMessage: string,
   chatHistory: ChatHistoryMessage[],
   productSlug?: string
 ): AsyncGenerator<string, void, unknown> {
-  // Determine available tools based on context
-  // getAllProducts is always available so users can get recommendations anywhere
   const tools = productSlug
     ? [
         getWebsiteDataDeclaration,
@@ -232,114 +263,139 @@ export async function* generateChatResponseStream(
       ]
     : [getWebsiteDataDeclaration, getAllProductsDeclaration];
 
-  // Build conversation history for Gemini
   const contents = chatHistory.map((msg) => ({
     role: msg.role === "user" ? "user" : "model",
     parts: [{ text: msg.content }],
   }));
 
-  // Add current user message
   contents.push({
     role: "user",
     parts: [{ text: userMessage }],
   });
 
-  try {
-    // Generate response with function calling
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-lite",
-      contents: contents,
-      config: {
-        systemInstruction: getSystemInstruction(productSlug),
-        tools: [{ functionDeclarations: tools }],
-      },
-    });
+  // 1. ATTEMPT INITIAL GENERATION (LOOP THROUGH MODELS)
+  let response;
+  let usedModel = BACKUP_MODELS[0];
 
-    // Handle function calls if present
-    if (response.functionCalls && response.functionCalls.length > 0) {
-      const functionResults = [];
-
-      for (const call of response.functionCalls) {
-        let result: string;
-
-        if (call.name === "getWebsiteData") {
-          const args = call.args as { infoType: string };
-          result = getWebsiteData(args.infoType || "all");
-        } else if (call.name === "getProductData") {
-          const args = call.args as { productSlug: string };
-          result = getProductData(args.productSlug || productSlug || "");
-        } else if (call.name === "getAllProducts") {
-          result = getAllProducts();
-        } else {
-          result = "Unknown function";
-        }
-
-        functionResults.push({
-          name: call.name,
-          response: { result },
-        });
-      }
-
-      // Send function results back to get final response with streaming
-      const followUpContents = [
-        ...contents,
-        {
-          role: "model",
-          parts: response.functionCalls.map((call) => ({
-            functionCall: call,
-          })),
-        },
-        {
-          role: "user",
-          parts: functionResults.map((fr) => ({
-            functionResponse: fr,
-          })),
-        },
-      ];
-
-      const streamResponse = await ai.models.generateContentStream({
-        model: "gemini-2.5-flash-lite",
-        contents: followUpContents,
-        config: {
-          systemInstruction: getSystemInstruction(productSlug),
-        },
-      });
-
-      for await (const chunk of streamResponse) {
-        if (chunk.text) {
-          yield chunk.text;
-        }
-      }
-    } else {
-      // Direct response without function calling - stream it
-      const streamResponse = await ai.models.generateContentStream({
-        model: "gemini-2.5-flash-lite",
+  for (const model of BACKUP_MODELS) {
+    try {
+      usedModel = model;
+      response = await ai.models.generateContent({
+        model: model,
         contents: contents,
         config: {
           systemInstruction: getSystemInstruction(productSlug),
+          tools: [{ functionDeclarations: tools }],
         },
       });
+      break; // Model worked, exit loop
+    } catch (error) {
+      // If it's the last model or NOT a rate limit error, handle gracefully
+      if (
+        model === BACKUP_MODELS[BACKUP_MODELS.length - 1] ||
+        !isRateLimitError(error)
+      ) {
+        console.error(`All models failed or non-retriable error:`, error);
+        yield "I'm currently experiencing high traffic. Please try again in a few seconds.";
+        return;
+      }
+      // Otherwise, log and try next model
+      console.warn(`Model ${model} hit rate limit. Switching to next...`);
+    }
+  }
 
-      for await (const chunk of streamResponse) {
-        if (chunk.text) {
-          yield chunk.text;
+  if (!response) return;
+
+  // 2. HANDLE FUNCTION CALLS
+  if (response.functionCalls && response.functionCalls.length > 0) {
+    const functionResults = [];
+
+    for (const call of response.functionCalls) {
+      let result: string;
+
+      if (call.name === "getWebsiteData") {
+        const args = call.args as { infoType: string };
+        result = getWebsiteData(args.infoType || "all");
+      } else if (call.name === "getProductData") {
+        const args = call.args as { productSlug: string };
+        result = getProductData(args.productSlug || productSlug || "");
+      } else if (call.name === "getAllProducts") {
+        result = getAllProducts();
+      } else {
+        result = "Unknown function";
+      }
+
+      functionResults.push({
+        name: call.name,
+        response: { result },
+      });
+    }
+
+    const followUpContents = [
+      ...contents,
+      {
+        role: "model",
+        parts: response.functionCalls.map((call) => ({
+          functionCall: call,
+        })),
+      },
+      {
+        role: "user",
+        parts: functionResults.map((fr) => ({
+          functionResponse: fr,
+        })),
+      },
+    ];
+
+    // 3. ATTEMPT STREAMING WITH FALLBACK (prioritize the model that just worked)
+    let streamStarted = false;
+    // Reorder models to try the working model first
+    const modelsToTry = [
+      usedModel,
+      ...BACKUP_MODELS.filter((m) => m !== usedModel),
+    ];
+
+    for (const model of modelsToTry) {
+      try {
+        const streamResponse = await ai.models.generateContentStream({
+          model: model,
+          contents: followUpContents,
+          config: { systemInstruction: getSystemInstruction(productSlug) },
+        });
+
+        for await (const chunk of streamResponse) {
+          if (chunk.text) yield chunk.text;
         }
+        streamStarted = true;
+        break; // Success
+      } catch (error) {
+        if (
+          model === modelsToTry[modelsToTry.length - 1] ||
+          !isRateLimitError(error)
+        ) {
+          if (!streamStarted)
+            yield " ... (System busy, unable to finish thought)";
+          return;
+        }
+        console.warn(
+          `Model ${model} hit rate limit during stream. Switching...`
+        );
       }
     }
-  } catch (error) {
-    console.error("AI Chat Error:", error);
-    yield "I'm having trouble connecting right now. Please try again in a moment.";
+  } else {
+    // 4. DIRECT RESPONSE - already have text from generateContent
+    if (response.text) {
+      yield response.text;
+    }
   }
 }
 
-// Main function to generate chat response (non-streaming, for backward compatibility)
+// Main function to generate chat response with Waterfall Fallback Logic (non-streaming)
 export async function generateChatResponse(
   userMessage: string,
   chatHistory: ChatHistoryMessage[],
   productSlug?: string
 ): Promise<{ response: string; suggestedQuestions: string[] }> {
-  // Determine available tools based on context
-  // getAllProducts is always available so users can get recommendations anywhere
   const tools = productSlug
     ? [
         getWebsiteDataDeclaration,
@@ -348,105 +404,131 @@ export async function generateChatResponse(
       ]
     : [getWebsiteDataDeclaration, getAllProductsDeclaration];
 
-  // Build conversation history for Gemini
   const contents = chatHistory.map((msg) => ({
     role: msg.role === "user" ? "user" : "model",
     parts: [{ text: msg.content }],
   }));
 
-  // Add current user message
   contents.push({
     role: "user",
     parts: [{ text: userMessage }],
   });
 
-  try {
-    // Generate response with function calling
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-lite",
-      contents: contents,
-      config: {
-        systemInstruction: getSystemInstruction(productSlug),
-        tools: [{ functionDeclarations: tools }],
-      },
-    });
+  // 1. INITIAL GENERATION - Loop through models
+  let response;
+  let usedModel = BACKUP_MODELS[0];
 
-    // Handle function calls if present
-    if (response.functionCalls && response.functionCalls.length > 0) {
-      const functionResults = [];
-
-      for (const call of response.functionCalls) {
-        let result: string;
-
-        if (call.name === "getWebsiteData") {
-          const args = call.args as { infoType: string };
-          result = getWebsiteData(args.infoType || "all");
-        } else if (call.name === "getProductData") {
-          const args = call.args as { productSlug: string };
-          result = getProductData(args.productSlug || productSlug || "");
-        } else if (call.name === "getAllProducts") {
-          result = getAllProducts();
-        } else {
-          result = "Unknown function";
-        }
-
-        functionResults.push({
-          name: call.name,
-          response: { result },
-        });
-      }
-
-      // Send function results back to get final response
-      const followUpContents = [
-        ...contents,
-        {
-          role: "model",
-          parts: response.functionCalls.map((call) => ({
-            functionCall: call,
-          })),
-        },
-        {
-          role: "user",
-          parts: functionResults.map((fr) => ({
-            functionResponse: fr,
-          })),
-        },
-      ];
-
-      const finalResponse = await ai.models.generateContent({
-        model: "gemini-2.5-flash-lite",
-        contents: followUpContents,
+  for (const model of BACKUP_MODELS) {
+    try {
+      usedModel = model;
+      response = await ai.models.generateContent({
+        model: model,
+        contents: contents,
         config: {
           systemInstruction: getSystemInstruction(productSlug),
+          tools: [{ functionDeclarations: tools }],
         },
       });
+      break; // Model worked, exit loop
+    } catch (error) {
+      if (
+        model === BACKUP_MODELS[BACKUP_MODELS.length - 1] ||
+        !isRateLimitError(error)
+      ) {
+        console.error(`All models failed or non-retriable error:`, error);
+        return {
+          response:
+            "I'm currently experiencing high traffic. Please try again in a moment.",
+          suggestedQuestions: [],
+        };
+      }
+      console.warn(`Model ${model} hit rate limit. Switching to next...`);
+    }
+  }
 
-      const suggestedQuestions = productSlug
-        ? getProductBySlug(productSlug)?.predefinedQuestions || []
-        : websiteInfo.defaultChatChips;
+  if (!response) {
+    return { response: "Error", suggestedQuestions: [] };
+  }
 
-      return {
-        response:
-          finalResponse.text || "I'm sorry, I couldn't generate a response.",
-        suggestedQuestions,
-      };
+  // 2. HANDLE FUNCTION CALLS
+  if (response.functionCalls && response.functionCalls.length > 0) {
+    const functionResults = [];
+
+    for (const call of response.functionCalls) {
+      let result: string;
+
+      if (call.name === "getWebsiteData") {
+        const args = call.args as { infoType: string };
+        result = getWebsiteData(args.infoType || "all");
+      } else if (call.name === "getProductData") {
+        const args = call.args as { productSlug: string };
+        result = getProductData(args.productSlug || productSlug || "");
+      } else if (call.name === "getAllProducts") {
+        result = getAllProducts();
+      } else {
+        result = "Unknown function";
+      }
+      functionResults.push({ name: call.name, response: { result } });
     }
 
-    // Direct response without function calling
-    const suggestedQuestions = productSlug
-      ? getProductBySlug(productSlug)?.predefinedQuestions || []
-      : websiteInfo.defaultChatChips;
+    const followUpContents = [
+      ...contents,
+      {
+        role: "model",
+        parts: response.functionCalls.map((call) => ({ functionCall: call })),
+      },
+      {
+        role: "user",
+        parts: functionResults.map((fr) => ({ functionResponse: fr })),
+      },
+    ];
 
-    return {
-      response: response.text || "I'm sorry, I couldn't generate a response.",
-      suggestedQuestions,
-    };
-  } catch (error) {
-    console.error("AI Chat Error:", error);
-    return {
-      response:
-        "I'm having trouble connecting right now. Please try again in a moment.",
-      suggestedQuestions: websiteInfo.defaultChatChips,
-    };
+    // 3. SECOND CALL WITH FALLBACK (prioritize the model that just worked)
+    const modelsToTry = [
+      usedModel,
+      ...BACKUP_MODELS.filter((m) => m !== usedModel),
+    ];
+
+    for (const model of modelsToTry) {
+      try {
+        const finalResponse = await ai.models.generateContent({
+          model: model,
+          contents: followUpContents,
+          config: { systemInstruction: getSystemInstruction(productSlug) },
+        });
+
+        const suggestedQuestions = productSlug
+          ? getProductBySlug(productSlug)?.predefinedQuestions || []
+          : websiteInfo.defaultChatChips;
+
+        return {
+          response: finalResponse.text || "...",
+          suggestedQuestions,
+        };
+      } catch (error) {
+        if (
+          model === modelsToTry[modelsToTry.length - 1] ||
+          !isRateLimitError(error)
+        ) {
+          return {
+            response: "System busy processing your request.",
+            suggestedQuestions: [],
+          };
+        }
+        console.warn(
+          `Model ${model} hit rate limit during follow-up. Switching...`
+        );
+      }
+    }
   }
+
+  // 4. DIRECT RESPONSE (no function calls)
+  const suggestedQuestions = productSlug
+    ? getProductBySlug(productSlug)?.predefinedQuestions || []
+    : websiteInfo.defaultChatChips;
+
+  return {
+    response: response.text || "I'm sorry, I couldn't generate a response.",
+    suggestedQuestions,
+  };
 }
