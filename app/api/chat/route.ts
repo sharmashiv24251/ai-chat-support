@@ -1,78 +1,166 @@
 import { NextRequest } from "next/server";
-import { generateChatResponseStream, ChatHistoryMessage } from "@/lib/ai/chat";
-import { websiteInfo } from "@/lib/constants/website";
-import { getProductBySlug } from "@/lib/constants/products";
+import { generateChatResponse, ChatHistoryMessage } from "@/lib/ai/chat";
+import { db } from "@/lib/db/db";
+import { conversations, messages } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
+
+// Validation constants
+const MAX_MESSAGE_LENGTH = 4000;
+
+// Helper to generate UUIDs
+function generateId(): string {
+  return crypto.randomUUID();
+}
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { message, history, productSlug } = body as {
-      message: string;
-      history: ChatHistoryMessage[];
-      productSlug?: string;
-    };
-
-    if (!message || typeof message !== "string") {
-      return new Response(
-        JSON.stringify({ error: "Message is required" }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
+    // Parse request body safely
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json(
+        { error: "Invalid JSON in request body" },
+        { status: 400 }
       );
     }
 
-    // Create a ReadableStream for streaming response
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        try {
-          let fullResponse = "";
+    // Validate body is an object
+    if (!body || typeof body !== "object") {
+      return Response.json(
+        { error: "Request body must be an object" },
+        { status: 400 }
+      );
+    }
 
-          // Stream the AI response
-          for await (const chunk of generateChatResponseStream(
-            message,
-            history || [],
-            productSlug
-          )) {
-            fullResponse += chunk;
-            // Send chunk as JSON with a newline delimiter
-            const data = JSON.stringify({ chunk }) + "\n";
-            controller.enqueue(encoder.encode(data));
-          }
+    const { message, conversationId, productSlug } = body as {
+      message?: unknown;
+      conversationId?: unknown;
+      productSlug?: unknown;
+    };
 
-          // Send suggested questions at the end
-          const suggestedQuestions = productSlug
-            ? getProductBySlug(productSlug)?.predefinedQuestions || []
-            : websiteInfo.defaultChatChips;
+    // Validate message exists and is a string
+    if (message === undefined || message === null) {
+      return Response.json({ error: "Message is required" }, { status: 400 });
+    }
 
-          const finalData = JSON.stringify({
-            done: true,
-            suggestedQuestions,
-            fullResponse,
-          }) + "\n";
-          controller.enqueue(encoder.encode(finalData));
-          controller.close();
-        } catch (error) {
-          console.error("Stream Error:", error);
-          const errorData = JSON.stringify({
-            error: "Failed to generate response",
-          }) + "\n";
-          controller.enqueue(encoder.encode(errorData));
-          controller.close();
-        }
-      },
+    if (typeof message !== "string") {
+      return Response.json(
+        { error: "Message must be a string" },
+        { status: 400 }
+      );
+    }
+
+    // Validate message is not empty
+    const trimmedMessage = message.trim();
+    if (trimmedMessage.length === 0) {
+      return Response.json(
+        { error: "Message cannot be empty" },
+        { status: 400 }
+      );
+    }
+
+    // Validate message length
+    if (trimmedMessage.length > MAX_MESSAGE_LENGTH) {
+      return Response.json(
+        {
+          error: `Message exceeds maximum length of ${MAX_MESSAGE_LENGTH} characters`,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Validate conversationId if provided
+    if (conversationId !== undefined && typeof conversationId !== "string") {
+      return Response.json(
+        { error: "conversationId must be a string" },
+        { status: 400 }
+      );
+    }
+
+    // Validate productSlug if provided
+    if (productSlug !== undefined && typeof productSlug !== "string") {
+      return Response.json(
+        { error: "productSlug must be a string" },
+        { status: 400 }
+      );
+    }
+
+    // Handle conversation: create new or fetch existing
+    let currentConversationId: string;
+    let chatHistory: ChatHistoryMessage[] = [];
+
+    if (conversationId) {
+      // Verify conversation exists
+      const existingConversation = await db.query.conversations.findFirst({
+        where: eq(conversations.id, conversationId),
+      });
+
+      if (!existingConversation) {
+        return Response.json(
+          { error: "Conversation not found" },
+          { status: 404 }
+        );
+      }
+
+      currentConversationId = conversationId;
+
+      // Fetch existing messages for chat history
+      const existingMessages = await db.query.messages.findMany({
+        where: eq(messages.conversationId, conversationId),
+        orderBy: (messages, { asc }) => [asc(messages.createdAt)],
+      });
+
+      chatHistory = existingMessages.map((msg) => ({
+        role: msg.role as "user" | "assistant",
+        content: msg.content,
+      }));
+    } else {
+      // Create new conversation
+      currentConversationId = generateId();
+      await db.insert(conversations).values({
+        id: currentConversationId,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    // Persist user message
+    const userMessageId = generateId();
+    await db.insert(messages).values({
+      id: userMessageId,
+      conversationId: currentConversationId,
+      role: "user",
+      content: trimmedMessage,
+      createdAt: new Date().toISOString(),
     });
 
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "application/x-ndjson",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-      },
+    // Generate AI response using existing logic (unchanged)
+    const { response: aiResponse } = await generateChatResponse(
+      trimmedMessage,
+      chatHistory,
+      typeof productSlug === "string" ? productSlug : undefined
+    );
+
+    // Persist AI response
+    const aiMessageId = generateId();
+    await db.insert(messages).values({
+      id: aiMessageId,
+      conversationId: currentConversationId,
+      role: "assistant",
+      content: aiResponse,
+      createdAt: new Date().toISOString(),
+    });
+
+    // Return response with conversationId
+    return Response.json({
+      reply: aiResponse,
+      conversationId: currentConversationId,
     });
   } catch (error) {
     console.error("Chat API Error:", error);
-    return new Response(
-      JSON.stringify({ error: "Failed to generate response" }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
+    return Response.json(
+      { error: "Failed to process request" },
+      { status: 500 }
     );
   }
 }

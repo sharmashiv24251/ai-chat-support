@@ -15,6 +15,7 @@ interface ChatWidgetProps {
   productName?: string;
   productSlug?: string;
   productChips?: string[];
+  onConversationUpdate?: () => void;
 }
 
 export default function ChatWidget({
@@ -23,6 +24,7 @@ export default function ChatWidget({
   productName,
   productSlug,
   productChips,
+  onConversationUpdate,
 }: ChatWidgetProps) {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -36,6 +38,7 @@ export default function ChatWidget({
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const defaultChips = [
@@ -51,7 +54,7 @@ export default function ChatWidget({
   }, [messages]);
 
   useEffect(() => {
-    // Reset messages when product changes
+    // Reset messages and conversation when product changes
     if (productName) {
       setMessages([
         {
@@ -72,6 +75,7 @@ export default function ChatWidget({
       ]);
       setChips(defaultChips);
     }
+    setConversationId(null); // Reset conversation for new product context
   }, [productName, productChips]);
 
   const sendMessage = async (text: string) => {
@@ -87,7 +91,7 @@ export default function ChatWidget({
     setInput("");
     setIsLoading(true);
 
-    // Create a temporary message for streaming
+    // Create a temporary message for the AI response
     const aiMessageId = (Date.now() + 1).toString();
     const aiMessage: Message = {
       id: aiMessageId,
@@ -97,12 +101,6 @@ export default function ChatWidget({
     setMessages((prev) => [...prev, aiMessage]);
 
     try {
-      // Build chat history for API (exclude current message)
-      const history = messages.map((msg) => ({
-        role: msg.role,
-        content: msg.content,
-      }));
-
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: {
@@ -110,65 +108,32 @@ export default function ChatWidget({
         },
         body: JSON.stringify({
           message: text,
-          history,
-          productSlug,
+          ...(conversationId && { conversationId }),
+          ...(productSlug && { productSlug }),
         }),
       });
 
+      const data = await response.json();
+
       if (!response.ok) {
-        throw new Error("Failed to get response");
+        throw new Error(data.error || "Failed to get response");
       }
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (!reader) {
-        throw new Error("No reader available");
+      // Update conversation ID if this is a new conversation
+      if (data.conversationId && !conversationId) {
+        setConversationId(data.conversationId);
       }
 
-      let accumulatedContent = "";
+      // Update the AI message with the response
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === aiMessageId ? { ...msg, content: data.reply } : msg
+        )
+      );
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n").filter((line) => line.trim());
-
-        for (const line of lines) {
-          try {
-            const data = JSON.parse(line);
-
-            if (data.chunk) {
-              // Accumulate content
-              accumulatedContent += data.chunk;
-              // Update the message in real-time
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === aiMessageId
-                    ? { ...msg, content: accumulatedContent }
-                    : msg
-                )
-              );
-            }
-
-            if (data.done) {
-              // Update chips if suggested questions are returned
-              if (
-                data.suggestedQuestions &&
-                data.suggestedQuestions.length > 0
-              ) {
-                setChips(data.suggestedQuestions);
-              }
-            }
-
-            if (data.error) {
-              throw new Error(data.error);
-            }
-          } catch (parseError) {
-            console.error("Error parsing JSON:", parseError);
-          }
-        }
+      // Notify parent of conversation update for recent chats refresh
+      if (onConversationUpdate) {
+        onConversationUpdate();
       }
     } catch (error) {
       console.error("Chat error:", error);
@@ -179,7 +144,9 @@ export default function ChatWidget({
             ? {
                 ...msg,
                 content:
-                  "I'm having trouble connecting right now. Please try again in a moment.",
+                  error instanceof Error
+                    ? error.message
+                    : "I'm having trouble connecting right now. Please try again in a moment.",
               }
             : msg
         )
@@ -254,6 +221,15 @@ export default function ChatWidget({
           </div>
         </div>
         <div className="flex items-center gap-1">
+          {/* Session ID indicator */}
+          {conversationId && (
+            <div
+              className="text-[9px] text-neutral-400 font-mono mr-2 max-w-20 truncate"
+              title={conversationId}
+            >
+              {conversationId.slice(0, 8)}...
+            </div>
+          )}
           {/* Maximize/Minimize Button */}
           <button
             onClick={() => setIsMaximized(!isMaximized)}
@@ -328,7 +304,7 @@ export default function ChatWidget({
         {messages.map((msg) => (
           <ChatMessage key={msg.id} role={msg.role} content={msg.content} />
         ))}
-        {isLoading && (
+        {isLoading && messages[messages.length - 1]?.content === "" && (
           <div className="flex gap-1 px-4 py-3">
             <span className="h-2 w-2 bg-neutral-400 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
             <span className="h-2 w-2 bg-neutral-400 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
