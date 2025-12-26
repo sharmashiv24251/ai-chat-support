@@ -1,10 +1,14 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db/db";
+import { initializeDatabase } from "@/lib/db/init";
 import { conversations, messages } from "@/lib/db/schema";
 import { eq, desc } from "drizzle-orm";
 
 export async function GET(request: NextRequest) {
   try {
+    // Initialize database tables if they don't exist
+    await initializeDatabase();
+
     const { searchParams } = new URL(request.url);
     const conversationId = searchParams.get("conversationId");
 

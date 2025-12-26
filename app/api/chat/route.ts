@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { generateChatResponse, ChatHistoryMessage } from "@/lib/ai/chat";
 import { db } from "@/lib/db/db";
+import { initializeDatabase } from "@/lib/db/init";
 import { conversations, messages } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 
@@ -27,6 +28,9 @@ export async function POST(request: NextRequest) {
         { status: 503 }
       );
     }
+
+    // Initialize database tables if they don't exist
+    await initializeDatabase();
 
     // Parse request body safely
     let body: unknown;
